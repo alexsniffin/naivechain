@@ -3,10 +3,13 @@ var CryptoJS = require("crypto-js");
 var express = require("express");
 var bodyParser = require('body-parser');
 var WebSocket = require("ws");
+var aesjs = require('aes-js');
 
-var http_port = process.env.HTTP_PORT || 3001;
-var p2p_port = process.env.P2P_PORT || 6001;
-var initialPeers = process.env.PEERS ? process.env.PEERS.split(',') : [];
+var myArgs = process.argv.slice(2);
+var http_port = myArgs[0] || 3001;
+var p2p_port = myArgs[1] || 6001;
+var message_key = myArgs[2] || "0000000000000000000000000000000";
+var initialPeers = [];
 
 class Block {
     constructor(index, previousHash, timestamp, data, hash) {
@@ -26,7 +29,7 @@ var MessageType = {
 };
 
 var getGenesisBlock = () => {
-    return new Block(0, "0", 1465154705, "my genesis block!!", "816534932c2b7154836da6afc367695e6337db8a921823784c14378abed4f7d7");
+    return new Block(0, "0", 1465154705, "123fff", "816534932c2b7154836da6afc367695e6337db8a921823784c14378abed4f7d7");
 };
 
 var blockchain = [getGenesisBlock()];
@@ -37,7 +40,7 @@ var initHttpServer = () => {
 
     app.get('/blocks', (req, res) => res.send(JSON.stringify(blockchain)));
     app.post('/mineBlock', (req, res) => {
-        var newBlock = generateNextBlock(req.body.data);
+        var newBlock = generateNextBlock(encryptMessage(req.body.data));
         addBlock(newBlock);
         broadcast(responseLatestMsg());
         console.log('block added: ' + JSON.stringify(newBlock));
@@ -95,6 +98,49 @@ var initErrorHandler = (ws) => {
     ws.on('error', () => closeConnection(ws));
 };
 
+var encryptMessage = (message) => {
+    if (message === undefined)
+        return;
+
+    if (message.length === 0)
+        return;
+
+    var key = message_key;
+
+    if (key.length % 32 == 0) {
+        var keyBytes = aesjs.utils.utf8.toBytes(key);
+
+        var text = message;
+        var textBytes = aesjs.utils.utf8.toBytes(text);
+        
+        var aesCtr = new aesjs.ModeOfOperation.ctr(keyBytes, new aesjs.Counter(5));
+        var encryptedBytes = aesCtr.encrypt(textBytes);
+        
+        return aesjs.utils.hex.fromBytes(encryptedBytes);
+    }
+}
+
+var decryptMessage = (message) => {
+    if (message === undefined)
+        return;
+
+    if (message.length === 0)
+        return;
+
+    var key = message_key;
+
+    if (key.length % 32 == 0) {
+      var keyBytes = aesjs.utils.utf8.toBytes(key);
+  
+      var text = message;
+      var textBytes = aesjs.utils.hex.toBytes(text);
+      
+      var aesCtr = new aesjs.ModeOfOperation.ctr(keyBytes, new aesjs.Counter(5));
+      var decryptedBytes = aesCtr.decrypt(textBytes);
+       
+      return aesjs.utils.utf8.fromBytes(decryptedBytes);
+    }
+}
 
 var generateNextBlock = (blockData) => {
     var previousBlock = getLatestBlock();
@@ -103,7 +149,6 @@ var generateNextBlock = (blockData) => {
     var nextHash = calculateHash(nextIndex, previousBlock.hash, nextTimestamp, blockData);
     return new Block(nextIndex, previousBlock.hash, nextTimestamp, blockData, nextHash);
 };
-
 
 var calculateHashForBlock = (block) => {
     return calculateHash(block.index, block.previousHash, block.timestamp, block.data);
@@ -145,7 +190,11 @@ var connectToPeers = (newPeers) => {
 };
 
 var handleBlockchainResponse = (message) => {
-    var receivedBlocks = JSON.parse(message.data).sort((b1, b2) => (b1.index - b2.index));
+    var receivedBlocks = JSON.parse(message.data)
+        .sort((b1, b2) => (b1.index - b2.index));
+
+    receivedBlocks.forEach(block => console.log("Message: " + decryptMessage(block.data)));
+
     var latestBlockReceived = receivedBlocks[receivedBlocks.length - 1];
     var latestBlockHeld = getLatestBlock();
     if (latestBlockReceived.index > latestBlockHeld.index) {
